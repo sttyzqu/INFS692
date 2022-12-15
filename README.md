@@ -1,4 +1,4 @@
-#Implementation of the following techniques of Machine Learning and Deep Learning:
+Implementation of the following techniques of Machine Learning and Deep Learning:
 
 In **model1.rmd**,we will perform 3 types of Ensemble Classification Model such as:
 
