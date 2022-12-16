@@ -1,6 +1,18 @@
-Implementation of the following techniques of Machine Learning and Deep Learning:
+# DATA SCIENCE FINAL PROJECT
 
-In **model1.rmd**,we will perform 3 types of Ensemble Classification Model such as:
+## Objective
+
+The objective of this project is to develop different models to predict failure (endpoint)
+of the radiomics signature based from MRI, PET and CT scans.
+
+## Dataset
+
+radiomics.csv contains 197 rows and 498 columns:
+Failure.binary: binary property to predict
+
+## About the file
+
+In **model1.rmd**, we will perform 3 types of Ensemble Classification Model such as:
 
 1. **Bagging** -The advantage of using bagging in machine learning  reduces the variance, minimizes the overfitting of data and and improves the model's accuracy.
 
@@ -16,6 +28,10 @@ of Softmax. Every layer is followed by a dropout to avoid overfitting. we will d
 
 In **model3.rmd**, without considering the binary output and categorical variables in the dataset, we will compare the following clustering technique results such as **K-Means, Hierarchical and Model Based**.
 
+## Data Pre-Processing
+
 Before running these models, we perform **data pre-processing** such as we check for null and missing values, check for normality, if not, normalized the data and get the correlation of the whole data expect the categorical variables.
+
+
 
 
