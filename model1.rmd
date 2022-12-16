@@ -1,0 +1,586 @@
+---
+title: "Model 1"
+author: "SITTY AZQUIA M. CAMAMA"
+date: "2022-12-15"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+# Ensemble Classification Model
+
+In this document, we will perform Ensemble Classification Model using **radiomics data**.
+
+## Load Helper and Modeling Packages
+
+```{r}
+# Helper packages
+library(dplyr)       # for data wrangling
+library(ggplot2)     # for awesome plotting
+library(doParallel)  # for parallel backend to foreach
+library(foreach)     # for parallel processing with for loops
+library(rsample)     # for data splitting
+
+# Modeling packages for Bagging 
+library(caret)       # for general model fitting
+library(rpart)       # for fitting decision trees
+library(ipred)       # for fitting bagged decision trees
+library(e1071)
+library(ROCR)
+library(pROC)
+
+# Modeling packages for Random Forest
+library(ranger)      # a c++ implementation of random forest 
+library(h2o)         # a java-based implementation of random forest
+
+# Modeling packages for SVM
+library(caret)    # for classification and regression training
+library(kernlab)  # for fitting SVMs
+library(modeldata) #for Failure.binary data
+library(forcats)
+
+# Model interpretability packages
+library(pdp)      # for partial dependence plots, etc.
+library(vip)      # for variable importance plots
+
+# Model for normalization
+library(bestNormalize)
+```
+
+## Load Data Sets
+
+Radiomics data contains 197 rows and 431 columns: 
+**Failure.binary**: binary property to predict
+
+```{r}
+radiomicsdata <- read.csv("C:/R CLASS/FINAL PROJECT/radiomics_completedata.csv")
+View(radiomicsdata)
+```
+
+## Data Pre-Processing
+
+### Check for null and missing values
+
+Using `anyNA()` function, We can determine if any missing values in our data. The result shows either `TRUE` or `FALSE`. If true, omit the missing values using `na.omit()`. Hence, our data has no missing values.
+
+```{r}
+anyNA(radiomicsdata)
+```
+
+### Check for normality
+
+The **Shapiro-Wilk's Test** is used to check the normality of the data. The null hypothesis states that data are normally distributed. Before, we test the normality, remove the categorical and binary variable.
+
+```{r,warning=F}
+rd <- radiomicsdata%>%select_if(is.numeric) 
+rd <- rd[,-1]
+test <- apply(rd,2,function(x){shapiro.test(x)})
+```
+
+`unlist()` function is used to convert a list to vector, so we can have the list of p-value of all variables.
+
+```{r}
+pvalue_list <- unlist(lapply(test, function(x) x$p.value))
+```
+
+Compute the sum of total variable with p-value less than 0.05 alpha. Thus, we have 428 variables that are not normally distributed and Entropy_cooc.W.ADC is normally distributed.
+
+```{r}
+sum(pvalue_list<0.05)  # not normally distributed
+sum(pvalue_list>0.05)  # normally distributed
+test$Entropy_cooc.W.ADC
+```
+
+### Normalize data
+
+To normalize the data, remove first the categorical, binary and Entropy_cooc.W.ADC variable and use `orderNorm()` function. The `x.t`	is the elements of `orderNorm()` function transformed original data.
+
+```{r,warning=F}
+rdnorm=radiomicsdata[,c(3,5:length(names(radiomicsdata)))]
+rdnorm=apply(rdnorm,2,orderNorm)
+rdnorm=lapply(rdnorm, function(x) x$x.t)
+rdnorm=rdnorm%>%as.data.frame()
+```
+
+Test again using shapiro-wilk's test.
+
+```{r,warning=F}
+test2=apply(rdnorm,2,shapiro.test)
+pvalue_list2=unlist(lapply(test2, function(x) x$p.value))
+```
+
+Compute the sum of total variable with p-value less than 0.05 alpha and more than 0.05 alpha. Finally, our data is normally distributed.
+
+```{r,warning=F}
+sum(pvalue_list2<0.05)   # not normally distributed
+sum(pvalue_list2>0.05)   # normally distributed
+```
+
+Create new data with the **Failure.binary**, **Entropy_cooc.W.ADC**, and `rdnorm` variables. 
+
+```{r,warning=F}
+keep = select(radiomicsdata, c("Institution", "Failure.binary",  "Entropy_cooc.W.ADC"))
+ndata = cbind(keep,rdnorm)
+```
+
+## Splitting
+
+Split the data `ndata` into training (80%) and testing (30%). 
+
+```{r}
+# convert response column to a factor
+ndata$Failure.binary=as.factor(ndata$Failure.binary)
+
+set.seed(123) # make bootstrapping reproducible
+split = initial_split(ndata,prop = 0.8 ,strata = "Failure.binary")
+split_train <- training(split)
+split_test  <- testing(split)
+```
+
+## 1. Bagging
+
+This section provides an example of how to build an ensemble of predictions using bagging.Bagging is also known as bootstrap aggregating prediction models, is a general method for fitting multiple versions of a prediction model and then combining (or ensembling) them into an aggregated prediction and is designed to improve the stability and accuracy of regression and classification algorithms.
+
+### Train Bagged Model
+
+We can run the model by using `bagging()` function. We use `nbagg` to control how many iterations to include in the bagged model. As a general rule, the more trees the better. By using 100 nbagg, We have 0.1146 OOB error.
+
+```{r}
+# make bootstrapping reproducible
+set.seed(123)
+
+# train bagged model
+bmodel1 <- bagging(
+  formula = Failure.binary ~ .,
+  data = split_train,
+  nbagg = 100,  
+  coob = TRUE,
+  control = rpart.control(minsplit = 2, cp = 0)
+)
+
+bmodel1
+```
+
+### Train the model using caret 
+
+We can also use bagging within `caret` and use `cv method` with  10-fold, to determine how effectively our ensemble will generalize. In this model, our accuracy is 0.8841176.
+
+```{r}
+
+bmodel2 <- train(
+  Failure.binary ~ .,
+  data = split_train,
+  method = "treebag",
+  trControl = trainControl(method = "cv", number = 10),
+  nbagg = 200,  
+  control = rpart.control(minsplit = 2, cp = 0)
+)
+
+bmodel2
+```
+
+### Print the AUC values during Training
+
+```{r}
+# Compute predicted probabilities on training data
+prob.train <- predict(bmodel2, split_train, type = "prob")[,2]
+
+# Compute AUC metrics for cv_model1,2 and 3 
+perf.train <- prediction(prob.train, split_train$Failure.binary) %>%
+  performance(measure = "tpr", x.measure = "fpr")
+
+
+# Plot ROC curves 
+plot(perf.train, col = "black", lty = 2)
+
+
+# ROC plot for training data
+roc( split_train$Failure.binary ~ prob.train, plot=TRUE, legacy.axes=FALSE, 
+    percent=TRUE, col="black", lwd=2, print.auc=TRUE)
+
+```
+
+### Print the Top 20 Important Features during Training
+
+We use `vip()` function to construct a variable importance plot (VIP) of the top 20 features in the `bmodel2` model.
+
+```{r}
+vip::vip(bmodel2, num_features = 20)
+```
+
+Partial dependence plots to understand the relationship between Failure.binary and the Entropy_cooc.W.ADC and Failure features. Partial dependence plots tell us visually how each feature influences the predicted output, on average.
+
+```{r}
+# Construct partial dependence plots
+p1 <- pdp::partial(
+  bmodel2, pred.var = names(ndata)[3],
+  grid.resolution = 20 ) %>% 
+  autoplot()
+
+p2 <- pdp::partial(
+  bmodel2, pred.var = names(ndata)[4], 
+  grid.resolution = 20) %>% 
+  autoplot()
+
+gridExtra::grid.arrange(p1, p2, nrow = 1)
+
+```
+
+### Print the AUC values during Testing
+
+```{r}
+# Compute predicted probabilities on testing data
+prob.test <- predict(bmodel2, split_test, type = "prob")[,2]
+
+# Compute AUC metrics 
+perf.test <- prediction(prob.test, split_test$Failure.binary) %>%
+  performance(measure = "tpr", x.measure = "fpr")
+
+
+# Plot ROC curves  
+plot(perf.test, col = "black", lty = 2)
+
+
+# ROC plot for testing data
+roc( split_test$Failure.binary ~ prob.test, plot=TRUE, legacy.axes=FALSE, 
+    percent=TRUE, col="black", lwd=2, print.auc=TRUE)
+```
+
+## 2. Random Forest
+
+This section provides an example of how to build Random Forests. Random forests are built using the same fundamental principles as bagging and decision trees.Random forests help to reduce tree correlation by injecting more randomness into the tree-growing process.
+
+### Train Random Forest Model
+
+Without any tuning, all hyperparameters set to their default values. Then, we get 0.347878 OOB RMSE.
+
+```{r}
+# make bootstrapping reproducible
+set.seed(123)
+
+# number of features
+n_features <- length(setdiff(names(split_train), "Failure.binary"))
+
+# train a default random forest model
+rf <- ranger(
+  Failure.binary ~ ., 
+  data = split_train,
+  mtry = floor(n_features / 3),
+  respect.unordered.factors = "order",
+  seed = 123
+)
+
+# get OOB RMSE
+(default_rmse <- sqrt(rf$prediction.error)) #[1] 0.347878
+```
+
+### Create Hyperparameter Grid and Grid search
+
+Despite the fact that random forests work well right out of the box, there are several tunable hyperparameters we should take into account when training a model. One way to become more strategic is to consider how we proceed through our grid search
+
+```{r}
+# create hyperparameter grid
+hyper_grid <- expand.grid(
+  mtry = floor(n_features * c(.05, .15, .25, .333, .4)),
+  min.node.size = c(1, 3, 5, 10), 
+  replace = c(TRUE, FALSE),                               
+  sample.fraction = c(.5, .63, .8),                       
+  rmse = NA                                               
+)
+
+# execute full cartesian grid search
+for(i in seq_len(nrow(hyper_grid))) {
+  # fit model for ith hyperparameter combination
+  fit <- ranger(
+    formula         = Failure.binary ~ ., 
+    data            = split_train, 
+    num.trees       = n_features * 10,
+    mtry            = hyper_grid$mtry[i],
+    min.node.size   = hyper_grid$min.node.size[i],
+    replace         = hyper_grid$replace[i],
+    sample.fraction = hyper_grid$sample.fraction[i],
+    verbose         = FALSE,
+    seed            = 123,
+    respect.unordered.factors = 'order',
+  )
+  # export OOB error 
+  hyper_grid$rmse[i] <- sqrt(fit$prediction.error)
+}
+
+# assess top 10 models
+hyper_grid %>%
+  arrange(rmse) %>%
+  mutate(perc_gain = (default_rmse - rmse) / default_rmse * 100) %>%
+  head(10)
+```
+
+### Convert Training data to h2o object
+
+The following fits a default random forest model with `h2o` to illustrate that our baseline results (OOB RMSE= 0.3628804) are very similar to the baseline ranger model we fit earlier.
+
+```{r, warning=FALSE}
+h2o.no_progress()
+h2o.init(max_mem_size = "5g")
+
+# convert training data to h2o object
+train_h2o <- as.h2o(split_train)
+
+# set the response column to Failure.binary
+response <- "Failure.binary"
+
+# set the predictor names
+predictors <- setdiff(colnames(split_train), response)
+
+h2o_rf1 <- h2o.randomForest(
+  x = predictors, 
+  y = response,
+  training_frame = train_h2o, 
+  ntrees = n_features * 10,
+  seed = 123
+)
+
+h2o_rf1
+```
+
+### Hyperparameter Grid for h2o
+
+To execute a grid search in h2o we need our hyperparameter grid to be a list.
+
+```{r}
+hyper_grid <- list(
+  mtries = floor(n_features * c(.05, .15, .25, .333, .4)),
+  min_rows = c(1, 3, 5, 10),
+  max_depth = c(10, 20, 30),
+  sample_rate = c(.55, .632, .70, .80)
+)
+
+# random grid search strategy
+search_criteria <- list(
+  strategy = "RandomDiscrete",
+  stopping_metric = "mse",
+  stopping_tolerance = 0.001,   # stop if improvement is < 0.1%
+  stopping_rounds = 10,         # over the last 10 models
+  max_runtime_secs = 60*5      # or stop search after 5 min.
+)
+```
+
+### Perform grid search for h2o
+
+```{r}
+random_grid <- h2o.grid(
+  algorithm = "randomForest",
+  grid_id = "rf_random_grid",
+  x = predictors, 
+  y = response, 
+  training_frame = train_h2o,
+  hyper_params = hyper_grid,
+  ntrees = n_features * 10,
+  seed = 123,
+  stopping_metric = "RMSE",   
+  stopping_rounds = 10,           # stop if last 10 trees added 
+  stopping_tolerance = 0.005,     # don't improve RMSE by 0.5%
+  search_criteria = search_criteria
+)
+
+```
+
+```{r}
+# collect the results and sort by our model performance metric 
+# of choice
+random_grid_perf <- h2o.getGrid(
+  grid_id = "rf_random_grid", 
+  sort_by = "mse", 
+  decreasing = FALSE
+)
+random_grid_perf
+```
+
+### Print AUC values during Training
+
+```{r}
+# Compute predicted probabilities on training data
+prob.train1 <- predict(h2o_rf1, train_h2o, type = "prob")
+prob.train1=as.data.frame(prob.train1)[,2]
+train_h2o=as.data.frame(train_h2o)
+
+# Compute AUC metrics for cv_model1,2 and 3 
+perf.train1 <- prediction(prob.train1,train_h2o$Failure.binary) %>%
+  performance(measure = "tpr", x.measure = "fpr")
+
+
+# Plot ROC curves
+plot(perf.train1, col = "black", lty = 2)
+
+
+# ROC plot for training data
+roc( train_h2o$Failure.binary ~ prob.train1, plot=TRUE, legacy.axes=FALSE, 
+    percent=TRUE, col="black", lwd=2, print.auc=TRUE)
+
+```
+
+### Print the Top 20 Important Features during Training 
+
+Using `h2o_rf1`, print the the top 20 important features in training data.
+
+```{r}
+vip(h2o_rf1, num_features = 20)
+```
+
+The resulting VIPs shows the Top 20 most important variables based on impurity (left) and permutation (right).
+
+```{r}
+# re-run model with impurity-based variable importance
+rf_impurity <- ranger(
+  formula = Failure.binary ~ ., 
+  data = split_train, 
+  num.trees = 2000,
+  mtry = 32,
+  min.node.size = 1,
+  sample.fraction = .80,
+  replace = FALSE,
+  importance = "impurity",
+  respect.unordered.factors = "order",
+  verbose = FALSE,
+  seed  = 123
+)
+```
+
+
+```{r}
+# re-run model with permutation-based variable importance
+rf_permutation <- ranger(
+  formula = Failure.binary ~ ., 
+  data = split_train, 
+  num.trees = 2000,
+  mtry = 32,
+  min.node.size = 1,
+  sample.fraction = .80,
+  replace = FALSE,
+  importance = "permutation",
+  respect.unordered.factors = "order",
+  verbose = FALSE,
+  seed  = 123
+)
+
+#Plot the top importance for impurity and permutation
+p1 <- vip::vip(rf_impurity, num_features = 20, bar = FALSE)
+p2 <- vip::vip(rf_permutation, num_features = 20, bar = FALSE)
+
+gridExtra::grid.arrange(p1, p2, nrow = 1)
+```
+
+
+## 3. Support Vector Machine
+
+Support vector machines (SVMs) offer a direct approach to binary classification. SVMs use the kernel trick to enlarge the feature space using basis functions. A **Kernel Trick** is a simple method where a Non Linear data is projected onto a higher dimension space so as to make it easier to classify the data where it could be linearly divided by a plane. The popular kernel function used by SVMs are Linear `"svmLinear"`, Polynomial Kernel `"svmPoly"` and Radial basis kernel `"svmRadial"`. In the following chunks, we use `getModelInfo()` function to extract the hyperparameters from various SVM implementations with different kernel functions.
+
+```{r}
+# Linear (i.e., soft margin classifier)
+caret::getModelInfo("svmLinear")$svmLinear$parameters
+
+# Polynomial kernel
+caret::getModelInfo("svmPoly")$svmPoly$parameters
+
+# Radial basis kernel
+caret::getModelInfo("svmRadial")$svmRadial$parameters
+```
+
+### Run SVM Model in Training phase
+
+Using **split_train**, we can tune an SVM model with radial basis kernel.
+
+```{r}
+set.seed(1854)  # for reproducibility
+split_svm <- train(
+  Failure.binary ~ ., 
+  data = split_train,
+  method = "svmRadial",               
+  preProcess = c("center", "scale"),  
+  trControl = trainControl(method = "cv", number = 10),
+  tuneLength = 10
+)
+```
+
+Plot and print SVM model with with radial basis kernel.
+
+```{r}
+# Plot results
+ggplot(split_svm) + theme_light()
+
+# Print results
+split_svm$results
+```
+
+Control parameter
+
+```{r}
+class.weights = c("No" = 1, "Yes" = 10)
+
+# Control params for SVM
+ctrl <- trainControl(
+  method = "cv", 
+  number = 10, 
+  classProbs = TRUE,                 
+  summaryFunction = twoClassSummary  # also needed for AUC/ROC
+)
+
+split_train$Failure.binary=fct_recode(split_train$Failure.binary,No="0",Yes="1")
+
+```
+
+### Print the AUC values during Training
+
+```{r}
+# Tune an SVM
+set.seed(5628)  # for reproducibility
+train_svm_auc <- train(
+  Failure.binary ~ ., 
+  data = split_train,
+  method = "svmRadial",               
+  preProcess = c("center", "scale"),  
+  metric = "ROC",  # area under ROC curve (AUC)       
+  trControl = ctrl,
+  tuneLength = 10
+)
+
+# Print results
+train_svm_auc$results
+confusionMatrix(train_svm_auc)
+```
+
+### Print the Top 20 important features during Training
+
+```{r}
+prob_yes <- function(object, newdata) {
+  predict(object, newdata = newdata, type = "prob")[, "Yes"]
+}
+
+# Variable importance plot
+set.seed(2827)  # for reproducibility
+vip(train_svm_auc, method = "permute", nsim = 5, train = split_train, 
+    num_features=20, target = "Failure.binary", metric = "auc", 
+    reference_class = "Yes", pred_wrapper = prob_yes)
+```
+
+### Print the AUC values during Testing
+
+```{r}
+split_test$Failure.binary=fct_recode(split_test$Failure.binary,No="0",Yes="1")
+
+# Tune an SVM with radial 
+set.seed(5628)  # for reproducibility
+test_svm_auc <- train(
+  Failure.binary ~ ., 
+  data = split_test,
+  method = "svmRadial",               
+  preProcess = c("center", "scale"),  
+  metric = "ROC",  # area under ROC curve (AUC)       
+  trControl = ctrl,
+  tuneLength = 10
+)
+
+# Print results
+test_svm_auc$results
+confusionMatrix(test_svm_auc)
+```
+
